@@ -3,7 +3,8 @@
 // @namespace    https://yande.re/
 // @version      7.1
 // @match        https://yande.re/post*
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // ==/UserScript==
 
 function getCSRFToken() {
@@ -56,8 +57,7 @@ function getCSRFToken() {
 
     function readStoredGridColumns() {
         try {
-            const raw = localStorage.getItem(GRID_COLS_STORAGE_KEY);
-            if (raw == null) return DEFAULT_GRID_COLUMNS;
+            const raw = GM_getValue(GRID_COLS_STORAGE_KEY, DEFAULT_GRID_COLUMNS);
             return normalizeGridColumns(raw, DEFAULT_GRID_COLUMNS);
         } catch (e) {
             return DEFAULT_GRID_COLUMNS;
@@ -66,7 +66,7 @@ function getCSRFToken() {
 
     function saveGridColumns(columns) {
         try {
-            localStorage.setItem(GRID_COLS_STORAGE_KEY, String(columns));
+            GM_setValue(GRID_COLS_STORAGE_KEY, normalizeGridColumns(columns, DEFAULT_GRID_COLUMNS));
         } catch (e) {
             // 忽略存储错误
         }
@@ -78,7 +78,7 @@ function getCSRFToken() {
 
     function readStoredThemeMode() {
         try {
-            return normalizeThemeMode(localStorage.getItem(THEME_STORAGE_KEY));
+            return normalizeThemeMode(GM_getValue(THEME_STORAGE_KEY, 'light'));
         } catch (e) {
             return 'light';
         }
@@ -86,7 +86,7 @@ function getCSRFToken() {
 
     function saveThemeMode(mode) {
         try {
-            localStorage.setItem(THEME_STORAGE_KEY, normalizeThemeMode(mode));
+            GM_setValue(THEME_STORAGE_KEY, normalizeThemeMode(mode));
         } catch (e) {
             // 忽略存储错误
         }
