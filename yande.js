@@ -34,6 +34,15 @@ function getCSRFToken() {
 
     let loadedPosts = [];
     let currentIndex = 0;
+    let overlayContent = null;
+    let overlayLoadBtn = null;
+    let batchLoadingPromise = null;
+    let viewerImg = null;
+    let viewerStatus = null;
+    let viewerFavBtn = null;
+    let viewerLinkBtn = null;
+    let viewerSizeInfo = null;
+    let lastWheelAt = 0;
 
     let sortType = '1'; // 排序类型，1=默认，2=评分，3=收藏数
 
@@ -357,8 +366,8 @@ function getCSRFToken() {
     // 键盘快捷键
     document.addEventListener('keydown', e => {
         if (viewer) {
-            if (e.key === 'ArrowRight') switchImage(1);
-            if (e.key === 'ArrowLeft') switchImage(-1);
+            if (e.key === 'ArrowRight') void switchImage(1);
+            if (e.key === 'ArrowLeft') void switchImage(-1);
             if (e.key === 'Escape') closeViewer();
         }
     });
@@ -412,11 +421,13 @@ function getCSRFToken() {
         const content = document.createElement('div');
         content.className = 'yande-content';
         overlay.appendChild(content);
+        overlayContent = content;
 
         const loadBtn = document.createElement('button');
         loadBtn.className = 'yande-load-btn';
         loadBtn.textContent = '加载下一批';
         content.appendChild(loadBtn);
+        overlayLoadBtn = loadBtn;
 
         // 应用主题样式
         applyThemeStyles();
@@ -434,16 +445,20 @@ function getCSRFToken() {
             currentBatch = document.getElementById('startPageCount').value - 1;
             totalLoaded = 0;
             loadedPosts = [];
+            batchLoadingPromise = null;
             content.innerHTML = '';
             content.appendChild(loadBtn);
             applyThemeStyles();
-            loadNextBatch(content, loadBtn);
+            void loadNextBatch(content, loadBtn);
         };
 
-        loadBtn.onclick = () => loadNextBatch(content, loadBtn);
+        loadBtn.onclick = () => void loadNextBatch(content, loadBtn);
     }
 
     async function loadNextBatch(content, loadBtn) {
+        if (batchLoadingPromise) return batchLoadingPromise;
+
+        batchLoadingPromise = (async () => {
         currentBatch++;
 
         const params = new URLSearchParams(location.search);
@@ -473,6 +488,13 @@ function getCSRFToken() {
 
         // 批量应用主题样式，减少重绘
         applyThemeStyles();
+        })();
+
+        try {
+            await batchLoadingPromise;
+        } finally {
+            batchLoadingPromise = null;
+        }
     }
 
     async function loadPage(tags, page, limit, grid) {
@@ -596,11 +618,80 @@ function getCSRFToken() {
         btn.textContent = state ? '已收藏' : '收藏';
     }
 
+    function formatMB(size) {
+        if (!Number.isFinite(size) || size <= 0) return null;
+        return `${(size / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    function getViewerSizeText(post) {
+        const entries = [];
+        const pushEntry = (label, size, url) => {
+            const formatted = formatMB(size);
+            if (!formatted || !url) return;
+            if (entries.some(item => item.url === url)) return;
+            entries.push({ label, text: formatted, url });
+        };
+
+        pushEntry('原图', post.file_size, post.file_url);
+        pushEntry('JPEG', post.jpeg_file_size, post.jpeg_url);
+        pushEntry('PNG', post.png_file_size, post.png_url);
+
+        if (!entries.length) return '大小信息不可用';
+        return entries.map(item => `${item.label} ${item.text}`).join(' · ');
+    }
+
+    function updateViewerContent(index) {
+        const post = loadedPosts[index];
+        if (!post || !viewer || !viewerImg) return;
+
+        currentIndex = index;
+        viewerStatus.textContent = '加载中...';
+        viewerStatus.style.display = 'block';
+        viewerImg.style.opacity = '0';
+
+        viewerImg.onload = () => {
+            viewerImg.style.opacity = '1';
+            viewerStatus.style.display = 'none';
+        };
+        viewerImg.onerror = () => {
+            viewerStatus.textContent = '图片加载失败，点击重试';
+            viewerStatus.style.display = 'block';
+        };
+
+        viewerStatus.onclick = e => {
+            e.stopPropagation();
+            if (viewerStatus.textContent.includes('失败')) {
+                const retrySrc = `${post.sample_url}${post.sample_url.includes('?') ? '&' : '?'}retry=${Date.now()}`;
+                viewerImg.src = retrySrc;
+            }
+        };
+
+        viewerImg.src = post.sample_url;
+
+        const newFavBtn = createFavButton(post);
+        newFavBtn.style.left = '20px';
+        newFavBtn.style.bottom = '20px';
+        viewerFavBtn.replaceWith(newFavBtn);
+        viewerFavBtn = newFavBtn;
+
+        viewerLinkBtn.href = `/post/show/${post.id}`;
+        viewerSizeInfo.textContent = getViewerSizeText(post);
+    }
+
+    async function ensureNextPostLoaded() {
+        if (!overlayContent || !overlayLoadBtn || batchLoadingPromise) return false;
+        const oldLength = loadedPosts.length;
+        await loadNextBatch(overlayContent, overlayLoadBtn);
+        return loadedPosts.length > oldLength;
+    }
+
     function openViewer(index) {
         if (index < 0 || index >= loadedPosts.length) return;
-        
-        currentIndex = index;
-        const post = loadedPosts[index];
+
+        if (viewer) {
+            updateViewerContent(index);
+            return;
+        }
 
         viewer = document.createElement('div');
         viewer.className = 'yande-viewer';
@@ -613,36 +704,115 @@ function getCSRFToken() {
             align-items:center;
             z-index:9999999;
         `;
+        viewer.addEventListener('wheel', async e => {
+            e.preventDefault();
+            e.stopPropagation();
+            const now = Date.now();
+            if (now - lastWheelAt < 120) return;
+            lastWheelAt = now;
+            await switchImage(e.deltaY > 0 ? 1 : -1);
+        }, { passive: false });
 
         const img = document.createElement('img');
-        img.src = post.sample_url;
-        img.style.cssText = 'max-width:92%; max-height:92%; border-radius:12px; box-shadow:0 20px 40px rgba(0,0,0,.35);';
+        img.style.cssText = 'max-width:92%; max-height:92%; border-radius:12px; box-shadow:0 20px 40px rgba(0,0,0,.35); transition:opacity .18s ease; opacity:0;';
         img.onclick = e => e.stopPropagation(); // 防止点击图片关闭查看器
+        viewerImg = img;
 
-        const favBtn = createFavButton(post);
+        const status = document.createElement('div');
+        status.style.cssText = `
+            position:absolute;
+            top:20px;
+            left:50%;
+            transform:translateX(-50%);
+            padding:6px 12px;
+            border-radius:999px;
+            background:rgba(0,0,0,.55);
+            color:#fff;
+            font-size:12px;
+            user-select:none;
+        `;
+        viewerStatus = status;
+
+        const favBtn = createFavButton(loadedPosts[index]);
         favBtn.style.left = '20px';
         favBtn.style.bottom = '20px';
+        viewerFavBtn = favBtn;
+
+        const linkBtn = document.createElement('a');
+        linkBtn.className = 'yande-link-btn';
+        linkBtn.target = '_blank';
+        linkBtn.textContent = '打开';
+        linkBtn.style.cssText = `
+            position:absolute;
+            bottom:20px;
+            right:20px;
+            padding:6px 12px;
+            color:white;
+            text-decoration:none;
+            border-radius:999px;
+            font-weight:700;
+            font-size:12px;
+        `;
+        linkBtn.onclick = e => e.stopPropagation();
+        viewerLinkBtn = linkBtn;
+
+        const sizeInfo = document.createElement('div');
+        sizeInfo.style.cssText = `
+            position:absolute;
+            right:20px;
+            top:20px;
+            max-width:48vw;
+            padding:6px 10px;
+            border-radius:10px;
+            background:rgba(0,0,0,.42);
+            color:#fff;
+            font-size:12px;
+            line-height:1.35;
+            text-align:right;
+            pointer-events:none;
+        `;
+        viewerSizeInfo = sizeInfo;
 
         viewer.appendChild(img);
+        viewer.appendChild(status);
         viewer.appendChild(favBtn);
+        viewer.appendChild(linkBtn);
+        viewer.appendChild(sizeInfo);
         viewer.onclick = closeViewer;
 
         document.body.appendChild(viewer);
+        updateViewerContent(index);
         applyThemeStyles();
     }
 
     function closeViewer() {
+        if (!viewer) return;
         viewer.remove();
         viewer = null;
+        viewerImg = null;
+        viewerStatus = null;
+        viewerFavBtn = null;
+        viewerLinkBtn = null;
+        viewerSizeInfo = null;
     }
 
-    function switchImage(direction) {
-        currentIndex += direction;
+    async function switchImage(direction) {
+        let nextIndex = currentIndex + direction;
 
-        if (currentIndex < 0) currentIndex = 0;
-        if (currentIndex >= loadedPosts.length) currentIndex = loadedPosts.length - 1;
+        if (direction < 0 && nextIndex < 0) {
+            nextIndex = 0;
+        }
 
-        closeViewer();
-        openViewer(currentIndex);
+        if (direction > 0 && nextIndex >= loadedPosts.length) {
+            const loaded = await ensureNextPostLoaded();
+            nextIndex = loaded ? currentIndex + direction : loadedPosts.length - 1;
+        }
+
+        if (nextIndex < 0) nextIndex = 0;
+        if (nextIndex >= loadedPosts.length) nextIndex = loadedPosts.length - 1;
+
+        if (nextIndex !== currentIndex) {
+            openViewer(nextIndex);
+        }
     }
 })();
