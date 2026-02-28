@@ -55,7 +55,10 @@ function getCSRFToken() {
     ];
 
     // 记录当前会话内的本地收藏状态
+    const FAV_STATE_STORAGE_KEY = 'yande.favoriteStateMap';
     const favState = new Set();
+    const persistedFavState = readStoredFavoriteStateMap();
+    hydrateFavStateFromStorage();
     const onOverlayResize = () => refreshAllGridColumns();
 
     function normalizeGridColumns(value, fallback = DEFAULT_GRID_COLUMNS) {
@@ -99,6 +102,216 @@ function getCSRFToken() {
         } catch (e) {
             // 忽略存储错误
         }
+    }
+
+    function readStoredFavoriteStateMap() {
+        try {
+            const raw = GM_getValue(FAV_STATE_STORAGE_KEY, {});
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+            const cleaned = {};
+            for (const [id, value] of Object.entries(raw)) {
+                cleaned[id] = !!value;
+            }
+            return cleaned;
+        } catch (e) {
+            console.error('读取收藏状态失败:', e);
+            return {};
+        }
+    }
+
+    function hydrateFavStateFromStorage() {
+        for (const [id, value] of Object.entries(persistedFavState)) {
+            const numericId = Number(id);
+            if (!Number.isFinite(numericId)) continue;
+            if (value) {
+                favState.add(numericId);
+            } else {
+                favState.delete(numericId);
+            }
+        }
+    }
+
+    function persistFavoriteState(postId, state, source = 'unknown') {
+        const normalizedId = Number(postId);
+        if (!Number.isFinite(normalizedId)) return;
+
+        if (state) {
+            favState.add(normalizedId);
+        } else {
+            favState.delete(normalizedId);
+        }
+
+        persistedFavState[String(normalizedId)] = !!state;
+
+        try {
+            GM_setValue(FAV_STATE_STORAGE_KEY, persistedFavState);
+            console.log(`[YandeFavSync] 帖子 ${normalizedId} 收藏状态已更新为 ${state ? '已收藏' : '未收藏'}（来源：${source}）`);
+        } catch (e) {
+            console.error(`[YandeFavSync] 保存帖子 ${normalizedId} 收藏状态失败:`, e);
+        }
+    }
+
+    function isPostShowPage(pathname = location.pathname) {
+        return /^\/post\/show\/\d+/.test(pathname);
+    }
+
+    function getCurrentPostIdFromPath(pathname = location.pathname) {
+        const match = pathname.match(/^\/post\/show\/(\d+)/);
+        if (!match) return null;
+        const postId = Number(match[1]);
+        return Number.isFinite(postId) ? postId : null;
+    }
+
+    function getFavoriteActionFromElement(el) {
+        if (!el) return null;
+
+        const textSegments = [
+            el.textContent,
+            el.value,
+            el.title,
+            el.getAttribute?.('aria-label'),
+            el.getAttribute?.('data-action'),
+            el.getAttribute?.('href')
+        ].filter(Boolean).join(' ').toLowerCase();
+
+        if (!textSegments) return null;
+
+        if (/remove|unfav|取消收藏|取消\s*收藏|delete\s*fav/.test(textSegments)) return false;
+        if (/add|favorite|favourite|收藏/.test(textSegments)) return true;
+
+        return null;
+    }
+
+    function findFavoriteControlInPage() {
+        const selectors = [
+            '#add-to-favs a',
+            '#add-to-favs input[type="submit"]',
+            '#add-to-favs button',
+            'a[href*="/post/vote"]',
+            'form[action*="/post/vote"] input[type="submit"]',
+            'form[action*="/post/vote"] button'
+        ];
+
+        for (const selector of selectors) {
+            const candidates = document.querySelectorAll(selector);
+            for (const node of candidates) {
+                if (getFavoriteActionFromElement(node) !== null) return node;
+            }
+        }
+
+        return null;
+    }
+
+    function waitForFavoriteControl(timeoutMs = 12000) {
+        return new Promise(resolve => {
+            const immediate = findFavoriteControlInPage();
+            if (immediate) {
+                resolve(immediate);
+                return;
+            }
+
+            const observer = new MutationObserver(() => {
+                const matched = findFavoriteControlInPage();
+                if (!matched) return;
+                observer.disconnect();
+                resolve(matched);
+            });
+
+            observer.observe(document.documentElement || document.body, {
+                childList: true,
+                subtree: true
+            });
+
+            setTimeout(() => {
+                observer.disconnect();
+                resolve(null);
+            }, timeoutMs);
+        });
+    }
+
+    function initializeFavoriteStateForPostPage() {
+        if (!isPostShowPage()) return;
+
+        const postId = getCurrentPostIdFromPath();
+        if (!postId) return;
+
+        const run = async () => {
+            try {
+                const control = await waitForFavoriteControl();
+                if (!control) {
+                    console.warn(`[YandeFavSync] 未找到帖子 ${postId} 的收藏按钮，跳过初始化。`);
+                    return;
+                }
+
+                const favoriteState = getFavoriteActionFromElement(control);
+                if (favoriteState === null) {
+                    console.warn(`[YandeFavSync] 无法识别帖子 ${postId} 收藏按钮状态。`);
+                    return;
+                }
+
+                persistFavoriteState(postId, favoriteState, 'page-load');
+            } catch (e) {
+                console.error(`[YandeFavSync] 初始化帖子 ${postId} 收藏状态失败:`, e);
+            }
+        };
+
+        if (document.readyState === 'complete') {
+            setTimeout(() => void run(), 0);
+        } else {
+            window.addEventListener('load', () => void run(), { once: true });
+        }
+    }
+
+    function findFavoriteControlFromTarget(target) {
+        if (!(target instanceof Element)) return null;
+
+        const selectors = [
+            '#add-to-favs a',
+            '#add-to-favs input[type="submit"]',
+            '#add-to-favs button',
+            'a[href*="/post/vote"]',
+            'form[action*="/post/vote"] input[type="submit"]',
+            'form[action*="/post/vote"] button'
+        ];
+
+        for (const selector of selectors) {
+            const matched = target.closest(selector);
+            if (matched) return matched;
+        }
+
+        return null;
+    }
+
+    function setupFavoriteActionListenerForPostPage() {
+        if (!isPostShowPage()) return;
+
+        const postId = getCurrentPostIdFromPath();
+        if (!postId) return;
+
+        document.addEventListener('click', e => {
+            try {
+                const control = findFavoriteControlFromTarget(e.target);
+                if (!control) return;
+
+                const nextState = getFavoriteActionFromElement(control);
+                if (nextState === null) {
+                    console.warn(`[YandeFavSync] 点击收藏控件但未能识别动作，帖子 ${postId}`);
+                    return;
+                }
+
+                persistFavoriteState(postId, nextState, 'click');
+
+                setTimeout(() => {
+                    const latestControl = findFavoriteControlInPage();
+                    const latestState = getFavoriteActionFromElement(latestControl);
+                    if (latestState !== null) {
+                        persistFavoriteState(postId, latestState, 'post-click-refresh');
+                    }
+                }, 300);
+            } catch (err) {
+                console.error(`[YandeFavSync] 监听收藏点击失败，帖子 ${postId}:`, err);
+            }
+        }, true);
     }
 
     function getThemePalette() {
@@ -599,11 +812,7 @@ function getCSRFToken() {
                 });
 
                 if (response.ok) {
-                    if (newState) {
-                        favState.add(post.id);
-                    } else {
-                        favState.delete(post.id);
-                    }
+                    persistFavoriteState(post.id, newState, 'overlay-toggle');
                     updateFavUI(btn, newState);
                 }
             } catch (error) {
@@ -815,4 +1024,7 @@ function getCSRFToken() {
             openViewer(nextIndex);
         }
     }
+
+    initializeFavoriteStateForPostPage();
+    setupFavoriteActionListenerForPostPage();
 })();
